@@ -1,0 +1,22 @@
+{
+  "guitar_001": {
+    "id": "guitar_001",
+    "quantity": 15,
+    "price_retail": 45000,
+    "price_diller": 35000,
+    "price_mp": 42000,
+    "store_spb": 10,
+    "store_ekb": 5,
+    "lastUpdated": 1779025001087
+  },
+  "guitar_002": {
+    "id": "guitar_002",
+    "quantity": 3,
+    "price_retail": 89000,
+    "price_diller": 69000,
+    "price_mp": 85000,
+    "store_spb": 2,
+    "store_ekb": 1,
+    "lastUpdated": 1779025001087
+  }
+}

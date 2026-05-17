@@ -153,44 +153,42 @@ app.post('/api/update-from-lutner', async (req, res) => {
 // ========== 4. Эндпоинт для Tilda (полный каталог) ==========
 app.get('/api/catalog', async (req, res) => {
     try {
+        // 1. Загружаем актуальные цены/остатки (от API)
         const rawData = await fs.readFile(CATALOG_FILE, 'utf8');
-        let catalog = JSON.parse(rawData);
+        const apiCatalog = JSON.parse(rawData);
         
-        // Пытаемся загрузить свежие описания из CSV (если есть)
-        let descriptions = [];
+        // 2. Загружаем описания из CSV
+        let csvProducts = [];
         try {
-            await fs.access(CSV_FILE);
-            descriptions = [];
-            await pipeline(
-                createReadStream(CSV_FILE),
-                csv({ separator: ';', headers: true }),
-                async function* (source) {
-                    for await (const row of source) {
-                        descriptions.push(row);
-                    }
-                }
-            );
+            const csvRaw = await fs.readFile('descriptions.json', 'utf8');
+            csvProducts = JSON.parse(csvRaw);
         } catch (err) {
-            // CSV ещё не скачан
+            console.log('Файл описаний пока не создан');
         }
         
-        // Объединяем
-        const enriched = Object.values(catalog).map(product => {
-            const desc = descriptions.find(d => (d.ID || d.ARTICLE) === product.id) || {};
-            return {
-                ...product,
-                name: desc.NAME || product.name || 'Без названия',
-                description: desc.DESCRIPTION || '',
-                images: desc.IMAGES ? desc.IMAGES.split(';') : []
-            };
-        });
+        // 3. Объединяем
+        const merged = mergeCatalog(apiCatalog, csvProducts);
         
-        res.json({ success: true, count: enriched.length, products: enriched });
+        res.json({ 
+            success: true, 
+            count: merged.length,
+            lastCSVUpdate: csvProducts.length > 0 ? await getFileModTime('descriptions.json') : null,
+            products: merged 
+        });
         
     } catch (error) {
         res.json({ success: true, count: 0, products: [] });
     }
 });
+
+async function getFileModTime(filePath) {
+    try {
+        const stats = await fs.stat(filePath);
+        return stats.mtime;
+    } catch {
+        return null;
+    }
+}
 
 // ========== 5. Запуск периодической загрузки CSV ==========
 async function scheduleCSVDownload() {

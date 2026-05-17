@@ -9,7 +9,7 @@ const PORT = process.env.PORT || 3000;
 
 // Разрешаем запросы с Tilda (ваш домен на Tilda)
 app.use(cors({
-    origin: ['https://ваш-проект.tilda.ws', 'https://ваш-сайт.ru'],
+    origin: ['https://project16053916.tilda.ws', 'http://явыбираюгитару.рф'],
     methods: ['GET', 'POST']
 }));
 

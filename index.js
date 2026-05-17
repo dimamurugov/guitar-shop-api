@@ -52,6 +52,7 @@ app.post('/api/update-from-lutner', async (req, res) => {
         await fs.writeFile(CATALOG_FILE, JSON.stringify(catalog, null, 2));
         
         console.log(`✅ Получено обновление: ${products.length} товаров`);
+        console.log(`Товары: ${products}`);
         res.status(200).json({ status: 'ok', count: products.length });
         
     } catch (error) {

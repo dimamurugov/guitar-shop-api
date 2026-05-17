@@ -21,6 +21,7 @@
   "homepage": "https://github.com/dimamurugov/guitar-shop-api#readme",
   "dependencies": {
     "cors": "^2.8.6",
+    "csv-parser": "^3.2.1",
     "express": "^5.2.1"
   },
   "devDependencies": {

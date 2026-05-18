@@ -10,7 +10,6 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors({ origin: ['https://project16053916.tilda.ws'] }));
-app.use(express.json());
 
 const CATALOG_FILE = path.join(__dirname, 'catalog_cache.json');
 const CSV_URL = 'https://lutner.ru/bitrix/catalog_export/upload/hour.csv';

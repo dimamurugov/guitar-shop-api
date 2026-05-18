@@ -9,7 +9,7 @@ const { pipeline } = require('stream/promises');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors({ origin: ['https://project16053916.tilda.ws'] }));
+app.use(cors({ origin: ['https://proje7ct16053916.tilda.ws'] }));
 app.use(express.json());
 
 const CATALOG_FILE = path.join(__dirname, 'catalog_cache.json');
@@ -144,7 +144,7 @@ app.post('/api/update-from-lutner', async (req, res) => {
         }
         
         // Сохраняем обновлённый каталог
-        await fs.writeFile(CATALOG_FILE, JSON.stringify(catalog, null, 2));
+        // await fs.writeFile(CATALOG_FILE, JSON.stringify(catalog, null, 2));
         
         console.log(`✅ Обновлено: ${updatedCount} товаров, добавлено: ${newCount}`);
         console.log(`📊 Всего товаров в каталоге: ${Object.keys(catalog).length}`);

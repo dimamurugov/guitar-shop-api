@@ -14,10 +14,10 @@ app.use(cors({ origin: ['https://project16053916.tilda.ws'] }));
 const CATALOG_FILE = path.join(__dirname, 'catalog_cache.json');
 const CSV_URL = 'https://lutner.ru/bitrix/catalog_export/upload/hour.csv';
 
-// ========== 1. ЗАГРУЗКА CSV (раз в сутки) - базовые данные ==========
+// ========== 1. ЗАГРУЗКА CSV И СОЗДАНИЕ КАТАЛОГА ==========
 async function downloadAndBuildCatalog() {
     try {
-        console.log('🔄 Загрузка CSV...');
+        console.log('🔄 Загрузка CSV с гитарами...');
         const response = await fetch(CSV_URL);
         const csvText = await response.text();
         
@@ -35,7 +35,6 @@ async function downloadAndBuildCatalog() {
                         name: row.IE_NAME || 'Без названия',
                         brand: row.IP_PROP96 || '',
                         description: row.IP_PROP100 || '',
-                        // Временно заполняем из CSV, но потом обновим из API
                         quantity: parseInt(row.CP_QUANTITY) || 0,
                         price_retail: parseFloat(row.CV_PRICE_13) || 0,
                         price_diller: parseFloat(row.CV_PRICE_18) || 0,
@@ -49,238 +48,165 @@ async function downloadAndBuildCatalog() {
             }
         );
         
-        // Преобразуем в объект { id: product }
-        const catalog = {};
-        products.forEach(p => { catalog[p.id] = p; });
+        // Проверяем, что products - это массив
+        console.log(`📊 Собрано ${products.length} товаров в массиве`);
+        console.log(`📝 Первый товар: ${products[0]?.name} (${products[0]?.id})`);
+        console.log(`📝 Последний товар: ${products[products.length-1]?.name}`);
         
-        await fs.writeFile(CATALOG_FILE, JSON.stringify(catalog, null, 2));
+        // Сохраняем каталог как МАССИВ (не объект)
+        await fs.writeFile(CATALOG_FILE, JSON.stringify(products, null, 2));
+        
+        // Проверяем, что записалось
+        const verify = await fs.readFile(CATALOG_FILE, 'utf8');
+        const parsed = JSON.parse(verify);
+        console.log(`✅ Проверка: в файле ${parsed.length} товаров`);
+        
         await fs.unlink(tempCsvPath);
         
-        console.log(`✅ CSV загружен: ${products.length} товаров`);
+        console.log(`✅ Каталог сохранён: ${products.length} гитар`);
         return products.length;
         
     } catch (error) {
         console.error('❌ Ошибка загрузки CSV:', error);
+        console.error(error.stack);
         return 0;
     }
 }
 
-// ========== 2. API ДЛЯ ПОСТАВЩИКА (обновление цен и остатков) ==========
-// Формат данных от поставщика:
-// [
-//   {
-//     "id": "f5d28cba-afb2-11ea-9560-001e67103b79",
-//     "quantity": 0,
-//     "price_retail": 780,
-//     "price_diller": 497,
-//     "price_mp": 936,
-//     "store_spb": 0,
-//     "store_ekb": 0
-//   }
-// ]
-app.post('/api/update-from-lutner', async (req, res) => {
+// ========== 2. ЭНДПОИНТ ДЛЯ TILDA ==========
+app.get('/api/catalog', async (req, res) => {
     try {
-        const updates = req.body;
-        
-        // Валидация: проверяем, что это массив
-        if (!Array.isArray(updates)) {
-            console.error('Ошибка: получены не массив данных');
-            return res.status(400).json({ 
-                error: 'Invalid data format. Expected array of products.' 
+        // Проверяем, существует ли файл
+        try {
+            await fs.access(CATALOG_FILE);
+        } catch (err) {
+            console.log('❌ Файл каталога не найден');
+            return res.json({
+                success: true,
+                count: 0,
+                products: []
             });
         }
         
-        console.log(`📡 Получено обновление от поставщика: ${updates.length} товаров`);
-        
-        // Загружаем текущий каталог
-        let catalog = {};
-        try {
-            const data = await fs.readFile(CATALOG_FILE, 'utf8');
-            catalog = JSON.parse(data);
-        } catch (err) {
-            console.log('Каталог ещё не создан, создаём новый');
-        }
-        
-        let updatedCount = 0;
-        let newCount = 0;
-        
-        // Обновляем данные для каждого товара из API
-        for (const update of updates) {
-            // Проверяем обязательные поля
-            if (!update.id) {
-                console.warn('Пропущен товар без ID');
-                continue;
-            }
-            
-            if (catalog[update.id]) {
-                // Обновляем только те поля, которые пришли от поставщика
-                // (сохраняем name, brand, description из CSV)
-                catalog[update.id].quantity = update.quantity !== undefined ? update.quantity : catalog[update.id].quantity;
-                catalog[update.id].price_retail = update.price_retail !== undefined ? update.price_retail : catalog[update.id].price_retail;
-                catalog[update.id].price_diller = update.price_diller !== undefined ? update.price_diller : catalog[update.id].price_diller;
-                catalog[update.id].price_mp = update.price_mp !== undefined ? update.price_mp : catalog[update.id].price_mp;
-                catalog[update.id].store_spb = update.store_spb !== undefined ? update.store_spb : catalog[update.id].store_spb;
-                catalog[update.id].store_ekb = update.store_ekb !== undefined ? update.store_ekb : catalog[update.id].store_ekb;
-                catalog[update.id].lastUpdated = Date.now();
-                updatedCount++;
-            } else {
-                // Новый товар (его нет в CSV)
-                catalog[update.id] = {
-                    id: update.id,
-                    name: `Товар ${update.id}`,
-                    quantity: update.quantity || 0,
-                    price_retail: update.price_retail || 0,
-                    price_diller: update.price_diller || 0,
-                    price_mp: update.price_mp || 0,
-                    store_spb: update.store_spb || 0,
-                    store_ekb: update.store_ekb || 0,
-                    lastUpdated: Date.now(),
-                    brand: '',
-                    description: ''
-                };
-                newCount++;
-            }
-        }
-        
-        // Сохраняем обновлённый каталог
-        // await fs.writeFile(CATALOG_FILE, JSON.stringify(catalog, null, 2));
-        
-        console.log(`✅ Обновлено: ${updatedCount} товаров, добавлено: ${newCount}`);
-        console.log(`📊 Всего товаров в каталоге: ${Object.keys(catalog).length}`);
-        
-        // Отвечаем поставщику, что всё принято (обязательно!)
-        res.status(200).json({ 
-            status: 'ok',
-            received: updates.length,
-            updated: updatedCount,
-            added: newCount,
-            total: Object.keys(catalog).length,
-            timestamp: Date.now()
-        });
-        
-    } catch (error) {
-        console.error('❌ Ошибка при обработке запроса от поставщика:', error);
-        res.status(500).json({ 
-            error: 'Internal server error',
-            message: error.message 
-        });
-    }
-});
-
-// ========== 3. ЭНДПОИНТ ДЛЯ TILDA ==========
-app.get('/api/catalog', async (req, res) => {
-    try {
+        // Читаем файл
         const data = await fs.readFile(CATALOG_FILE, 'utf8');
-        const catalog = JSON.parse(data);
-        const products = Object.values(catalog);
+        console.log(`📄 Размер файла: ${data.length} байт`);
+        
+        // Парсим JSON
+        let products;
+        try {
+            products = JSON.parse(data);
+        } catch (parseErr) {
+            console.error('❌ Ошибка парсинга JSON:', parseErr);
+            return res.json({
+                success: true,
+                count: 0,
+                products: [],
+                error: 'JSON parse error'
+            });
+        }
+        
+        // Проверяем, что products - это массив
+        if (!Array.isArray(products)) {
+            console.error('❌ products не является массивом, это:', typeof products);
+            console.log(`📦 Тип: ${typeof products}, содержимое: ${Object.keys(products).length} ключей`);
+            
+            // Если это объект, конвертируем в массив
+            if (typeof products === 'object' && products !== null) {
+                products = Object.values(products);
+                console.log(`🔄 Конвертировано в массив: ${products.length} товаров`);
+            }
+        }
         
         console.log(`📤 Отправлено ${products.length} товаров на Tilda`);
         
-        // Формируем ответ в удобном для Tilda формате
+        // Для отладки: показываем первые 3 товара
+        if (products.length > 0) {
+            console.log(`🔍 Первые 3 товара в ответе:`);
+            products.slice(0, 3).forEach((p, i) => {
+                console.log(`   ${i+1}. ${p.name} (${p.id})`);
+            });
+        }
+        
         res.json({
             success: true,
             count: products.length,
             lastUpdate: products[0]?.lastUpdated || null,
-            products: products.map(p => ({
-                // Основные поля для отображения на сайте
-                id: p.id,
-                name: p.name,
-                description: p.description,
-                brand: p.brand,
-                
-                // Цены и остатки (актуальные из API)
-                quantity: p.quantity,
-                price_retail: p.price_retail,
-                price_diller: p.price_diller,
-                price_mp: p.price_mp,
-                store_spb: p.store_spb,
-                store_ekb: p.store_ekb,
-                
-                // Служебная информация
-                lastUpdated: p.lastUpdated,
-                sale: p.sale || 0
-            }))
+            products: products
         });
         
     } catch (error) {
-        console.log('Каталог ещё не создан');
+        console.error('❌ Ошибка в эндпоинте /api/catalog:', error);
+        console.error(error.stack);
         res.json({
-            success: true,
+            success: false,
             count: 0,
-            products: []
+            products: [],
+            error: error.message
         });
     }
 });
 
-// ========== 4. ПРОВЕРОЧНЫЙ ЭНДПОИНТ ДЛЯ ТЕСТИРОВАНИЯ ==========
-app.get('/api/test-update', async (req, res) => {
-    // Тестовые данные в формате поставщика
-    const testData = [
-        {
-            "id": "test-guitar-001",
-            "quantity": 10,
-            "price_retail": 45000,
-            "price_diller": 35000,
-            "price_mp": 42000,
-            "store_spb": 7,
-            "store_ekb": 3
-        },
-        {
-            "id": "test-guitar-002",
-            "quantity": 5,
-            "price_retail": 89000,
-            "price_diller": 69000,
-            "price_mp": 85000,
-            "store_spb": 4,
-            "store_ekb": 1
+// ========== 3. ДОПОЛНИТЕЛЬНЫЙ ЭНДПОИНТ ДЛЯ ДИАГНОСТИКИ ==========
+app.get('/api/debug', async (req, res) => {
+    try {
+        const exists = await fs.access(CATALOG_FILE).then(() => true).catch(() => false);
+        let fileSize = 0;
+        let fileContent = null;
+        
+        if (exists) {
+            const stats = await fs.stat(CATALOG_FILE);
+            fileSize = stats.size;
+            fileContent = await fs.readFile(CATALOG_FILE, 'utf8');
         }
-    ];
-    
-    // Имитируем запрос от поставщика
-    const mockReq = { body: testData };
-    const mockRes = {
-        status: (code) => ({ json: (data) => console.log('Response:', code, data) })
-    };
-    
-    await app.handle(mockReq, mockRes);
-    res.json({ message: 'Тестовые данные отправлены на /api/update-from-lutner' });
+        
+        res.json({
+            file_exists: exists,
+            file_size_bytes: fileSize,
+            file_size_mb: (fileSize / 1024 / 1024).toFixed(2),
+            file_preview: fileContent ? fileContent.substring(0, 500) : null,
+            server_time: new Date().toISOString()
+        });
+    } catch (error) {
+        res.json({ error: error.message });
+    }
 });
 
-// ========== 5. КОРНЕВОЙ ЭНДПОИНТ ==========
+// ========== 4. КОРНЕВОЙ ЭНДПОИНТ ==========
 app.get('/', (req, res) => {
     res.send(`
         <h2>🎸 Guitar Shop API Server</h2>
         <p>✅ Сервер работает</p>
         <p>📦 <a href="/api/catalog">Просмотреть каталог</a></p>
+        <p>🔧 <a href="/api/debug">Диагностика</a></p>
         <hr>
-        <h3>🔌 Доступные эндпоинты:</h3>
-        <ul>
-            <li><strong>POST /api/update-from-lutner</strong> - для поставщика (обновление цен/остатков)</li>
-            <li><strong>GET /api/catalog</strong> - для Tilda (получение каталога)</li>
-            <li><strong>GET /api/test-update</strong> - для тестирования (отправляет тестовые данные)</li>
-        </ul>
-        <hr>
-        <p>📊 Статус каталога: <span id="status">загрузка...</span></p>
+        <p>📊 Статус: <span id="status">загрузка...</span></p>
         <script>
             fetch('/api/catalog')
                 .then(r => r.json())
                 .then(data => {
                     document.getElementById('status').innerHTML = 
-                        \`✅ \${data.count} товаров (последнее обновление: \${new Date(data.lastUpdate).toLocaleString()})\`;
+                        \`✅ \${data.count} гитар (обновлено: \${data.lastUpdate ? new Date(data.lastUpdate).toLocaleString() : 'никогда'})\`;
                 })
-                .catch(e => document.getElementById('status').innerHTML = '❌ Ошибка загрузки');
+                .catch(e => document.getElementById('status').innerHTML = '❌ Ошибка: ' + e.message);
         </script>
     `);
 });
 
-// ========== 6. ЗАПУСК СЕРВЕРА ==========
+// ========== 5. ЗАПУСК СЕРВЕРА ==========
 app.listen(PORT, async () => {
     console.log(`\n🚀 Сервер запущен на порту ${PORT}`);
-    console.log(`📍 Эндпоинт для поставщика: POST /api/update-from-lutner`);
-    console.log(`📍 Эндпоинт для Tilda: GET /api/catalog\n`);
+    console.log(`📍 Эндпоинт для Tilda: GET /api/catalog`);
+    console.log(`📍 Диагностика: GET /api/debug\n`);
     
     // Загружаем CSV при старте
-    console.log('📥 Инициализация каталога...');
+    console.log('📥 Загрузка каталога...');
     const count = await downloadAndBuildCatalog();
-    console.log(`✅ Готово: ${count} товаров в каталоге\n`);
+    console.log(`✅ Готово: ${count} гитар в каталоге\n`);
+    
+    // Обновляем каталог раз в сутки (86400000 мс)
+    setInterval(async () => {
+        console.log('🔄 Плановое обновление каталога...');
+        await downloadAndBuildCatalog();
+    }, 86400000);
 });

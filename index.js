@@ -9,7 +9,7 @@ const { pipeline } = require('stream/promises');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors({ origin: ['https://proje7ct16053916.tilda.ws'] }));
+app.use(cors({ origin: ['https://project16053916.tilda.ws'] }));
 app.use(express.json());
 
 const CATALOG_FILE = path.join(__dirname, 'catalog_cache.json');

@@ -496,6 +496,515 @@ async function startServer(): Promise<void> {
     }, 86400000);
 }
 
+// ========== ДОБАВЛЯЕМ ПОСЛЕ СУЩЕСТВУЮЩИХ ЭНДПОИНТОВ ==========
+
+/**
+ * Административная панель (HTML интерфейс)
+ * GET /admin
+ */
+app.get('/admin', (req: Request, res: Response) => {
+    res.send(`
+        <!DOCTYPE html>
+        <html lang="ru">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Админ-панель | Guitar Shop API</title>
+            <style>
+                * {
+                    box-sizing: border-box;
+                }
+                body {
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                    background: #f5f5f5;
+                    margin: 0;
+                    padding: 20px;
+                }
+                .container {
+                    max-width: 1200px;
+                    margin: 0 auto;
+                }
+                h1 {
+                    color: #2c5f2d;
+                    margin-bottom: 10px;
+                }
+                .subtitle {
+                    color: #666;
+                    margin-bottom: 30px;
+                    border-bottom: 1px solid #ddd;
+                    padding-bottom: 10px;
+                }
+                .status-card {
+                    background: white;
+                    border-radius: 12px;
+                    padding: 20px;
+                    margin-bottom: 20px;
+                    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+                }
+                .status-grid {
+                    display: grid;
+                    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+                    gap: 15px;
+                    margin-top: 15px;
+                }
+                .status-item {
+                    background: #f9f9f9;
+                    padding: 15px;
+                    border-radius: 8px;
+                    text-align: center;
+                }
+                .status-label {
+                    font-size: 12px;
+                    color: #888;
+                    text-transform: uppercase;
+                    margin-bottom: 8px;
+                }
+                .status-value {
+                    font-size: 28px;
+                    font-weight: bold;
+                    color: #333;
+                }
+                .status-value.synced {
+                    color: #2c5f2d;
+                }
+                .status-value.pending {
+                    color: #e67e22;
+                }
+                .button-group {
+                    display: flex;
+                    gap: 15px;
+                    flex-wrap: wrap;
+                    margin-top: 20px;
+                }
+                .btn {
+                    padding: 12px 24px;
+                    border: none;
+                    border-radius: 8px;
+                    font-size: 14px;
+                    font-weight: 600;
+                    cursor: pointer;
+                    transition: all 0.2s;
+                }
+                .btn-primary {
+                    background: #2c5f2d;
+                    color: white;
+                }
+                .btn-primary:hover {
+                    background: #1e3b1f;
+                    transform: translateY(-1px);
+                }
+                .btn-secondary {
+                    background: #3498db;
+                    color: white;
+                }
+                .btn-secondary:hover {
+                    background: #2980b9;
+                }
+                .btn-danger {
+                    background: #e74c3c;
+                    color: white;
+                }
+                .btn-danger:hover {
+                    background: #c0392b;
+                }
+                .btn-warning {
+                    background: #e67e22;
+                    color: white;
+                }
+                .btn-warning:hover {
+                    background: #d35400;
+                }
+                .btn:disabled {
+                    background: #ccc;
+                    cursor: not-allowed;
+                    transform: none;
+                }
+                .log-container {
+                    background: #1e1e1e;
+                    color: #d4d4d4;
+                    border-radius: 8px;
+                    padding: 15px;
+                    font-family: 'Courier New', monospace;
+                    font-size: 12px;
+                    height: 300px;
+                    overflow-y: auto;
+                    margin-top: 20px;
+                }
+                .log-entry {
+                    margin-bottom: 4px;
+                    border-bottom: 1px solid #333;
+                    padding: 4px 0;
+                }
+                .log-entry.info { color: #4ec9b0; }
+                .log-entry.error { color: #f48771; }
+                .log-entry.success { color: #6a9955; }
+                .log-entry.warning { color: #dcdcaa; }
+                .spinner {
+                    display: inline-block;
+                    width: 14px;
+                    height: 14px;
+                    border: 2px solid #fff;
+                    border-top-color: transparent;
+                    border-radius: 50%;
+                    animation: spin 0.6s linear infinite;
+                    margin-left: 8px;
+                }
+                @keyframes spin {
+                    to { transform: rotate(360deg); }
+                }
+                .refresh-btn {
+                    background: none;
+                    border: none;
+                    font-size: 20px;
+                    cursor: pointer;
+                    padding: 0 8px;
+                }
+                .flex-between {
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                }
+                hr {
+                    margin: 20px 0;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="flex-between">
+                    <div>
+                        <h1>🎸 Guitar Shop API</h1>
+                        <div class="subtitle">Управление каталогом гитар и синхронизация с Tilda</div>
+                    </div>
+                    <button class="refresh-btn" onclick="loadAllData()" title="Обновить">🔄</button>
+                </div>
+                
+                <!-- Статус -->
+                <div class="status-card" id="status-card">
+                    <h3>📊 Статус синхронизации</h3>
+                    <div id="status-content">Загрузка...</div>
+                </div>
+                
+                <!-- Кнопки управления -->
+                <div class="status-card">
+                    <h3>⚙️ Управление процессами</h3>
+                    <div class="button-group">
+                        <button class="btn btn-primary" id="btn-load-csv" onclick="loadCSV()">
+                            📥 Загрузить CSV в БД
+                        </button>
+                        <button class="btn btn-secondary" id="btn-sync-tilda" onclick="syncToTilda()">
+                            🔄 Синхронизировать с Tilda
+                        </button>
+                        <button class="btn btn-warning" id="btn-sync-prices" onclick="testPriceUpdate()">
+                            💰 Тест обновления цен
+                        </button>
+                    </div>
+                    <div class="button-group" style="margin-top: 10px;">
+                        <button class="btn btn-danger" id="btn-reset-sync" onclick="resetSyncFlags()">
+                            🔄 Сбросить флаги синхронизации
+                        </button>
+                        <button class="btn btn-secondary" id="btn-check-status" onclick="loadAllData()">
+                            🔍 Проверить статус
+                        </button>
+                    </div>
+                </div>
+                
+                <!-- Логи -->
+                <div class="status-card">
+                    <div class="flex-between">
+                        <h3>📜 Лог операций</h3>
+                        <button class="refresh-btn" onclick="clearLogs()" title="Очистить">🗑️</button>
+                    </div>
+                    <div class="log-container" id="log-container">
+                        <div class="log-entry info">✨ Готов к работе. Используйте кнопки выше для управления.</div>
+                    </div>
+                </div>
+            </div>
+            
+            <script>
+                // Хранилище логов
+                let logs = ['✨ Готов к работе. Используйте кнопки выше для управления.'];
+                
+                function addLog(message, type = 'info') {
+                    const timestamp = new Date().toLocaleTimeString();
+                    logs.unshift(\`[\${timestamp}] \${message}\`);
+                    if (logs.length > 50) logs.pop();
+                    renderLogs();
+                }
+                
+                function renderLogs() {
+                    const container = document.getElementById('log-container');
+                    container.innerHTML = logs.map(log => {
+                        let type = 'info';
+                        if (log.includes('✅')) type = 'success';
+                        else if (log.includes('❌')) type = 'error';
+                        else if (log.includes('⚠️')) type = 'warning';
+                        return \`<div class="log-entry \${type}">\${escapeHtml(log)}</div>\`;
+                    }).join('');
+                }
+                
+                function clearLogs() {
+                    logs = [];
+                    addLog('🧹 Лог очищен');
+                }
+                
+                function escapeHtml(text) {
+                    const div = document.createElement('div');
+                    div.textContent = text;
+                    return div.innerHTML;
+                }
+                
+                async function loadAllData() {
+                    await loadStatus();
+                    await loadSyncStatus();
+                }
+                
+                async function loadStatus() {
+                    try {
+                        const response = await fetch('/api/status');
+                        const data = await response.json();
+                        
+                        document.getElementById('status-content').innerHTML = \`
+                            <div class="status-grid">
+                                <div class="status-item">
+                                    <div class="status-label">Всего товаров</div>
+                                    <div class="status-value">\${data.totalProducts || 0}</div>
+                                </div>
+                                <div class="status-item">
+                                    <div class="status-label">Последнее обновление</div>
+                                    <div class="status-value" style="font-size: 14px;">\${data.lastUpdate ? new Date(data.lastUpdate).toLocaleString() : 'никогда'}</div>
+                                </div>
+                                <div class="status-item">
+                                    <div class="status-label">Tilda API</div>
+                                    <div class="status-value" style="font-size: 14px; color: \${data.tildaConfigured ? '#2c5f2d' : '#e74c3c'}">
+                                        \${data.tildaConfigured ? '✅ Подключен' : '❌ Не настроен'}
+                                    </div>
+                                </div>
+                            </div>
+                        \`;
+                    } catch (error) {
+                        document.getElementById('status-content').innerHTML = \`<div style="color: red;">Ошибка загрузки статуса: \${error.message}</div>\`;
+                        addLog(\`❌ Ошибка загрузки статуса: \${error.message}\`, 'error');
+                    }
+                }
+                
+                async function loadSyncStatus() {
+                    try {
+                        const response = await fetch('/api/sync-status');
+                        const data = await response.json();
+                        
+                        // Добавляем информацию о синхронизации в существующий блок
+                        const syncHtml = \`
+                            <div style="margin-top: 20px; border-top: 1px solid #eee; padding-top: 15px;">
+                                <div class="status-grid">
+                                    <div class="status-item">
+                                        <div class="status-label">Синхронизировано с Tilda</div>
+                                        <div class="status-value synced">\${data.synced_to_tilda || 0}</div>
+                                    </div>
+                                    <div class="status-item">
+                                        <div class="status-label">Ожидают синхронизации</div>
+                                        <div class="status-value pending">\${data.pending_sync || 0}</div>
+                                    </div>
+                                    <div class="status-item">
+                                        <div class="status-label">Прогресс</div>
+                                        <div class="status-value">\${data.total_products > 0 ? Math.round((data.synced_to_tilda / data.total_products) * 100) : 0}%</div>
+                                    </div>
+                                </div>
+                                \${data.sync_in_progress ? '<div style="background: #fff3cd; padding: 10px; border-radius: 8px; margin-top: 10px;"><span class="spinner"></span> ⚡ Синхронизация в процессе...</div>' : ''}
+                            </div>
+                        \`;
+                        
+                        // Добавляем к существующему содержимому
+                        const statusContent = document.getElementById('status-content');
+                        statusContent.insertAdjacentHTML('beforeend', syncHtml);
+                    } catch (error) {
+                        addLog(\`❌ Ошибка загрузки статуса синхронизации: \${error.message}\`, 'error');
+                    }
+                }
+                
+                async function loadCSV() {
+                    const btn = document.getElementById('btn-load-csv');
+                    const originalText = btn.innerHTML;
+                    btn.innerHTML = '⏳ Загрузка...';
+                    btn.disabled = true;
+                    addLog('📥 Запуск загрузки CSV из lutner.ru...');
+                    
+                    try {
+                        const response = await fetch('/api/load-csv', { method: 'POST' });
+                        const data = await response.json();
+                        
+                        if (data.success) {
+                            addLog(\`✅ \${data.message}\`, 'success');
+                        } else {
+                            addLog(\`❌ Ошибка: \${data.error}\`, 'error');
+                        }
+                        await loadAllData();
+                    } catch (error) {
+                        addLog(\`❌ Ошибка: \${error.message}\`, 'error');
+                    } finally {
+                        btn.innerHTML = originalText;
+                        btn.disabled = false;
+                    }
+                }
+                
+                async function syncToTilda() {
+                    const btn = document.getElementById('btn-sync-tilda');
+                    const originalText = btn.innerHTML;
+                    btn.innerHTML = '⏳ Запуск...';
+                    btn.disabled = true;
+                    addLog('🔄 Запуск синхронизации с Tilda API...');
+                    addLog('⚠️ Это может занять несколько часов из-за лимитов API');
+                    
+                    try {
+                        const response = await fetch('/api/sync-to-tilda', { method: 'POST' });
+                        const data = await response.json();
+                        
+                        if (data.success) {
+                            addLog(\`✅ \${data.message}\`, 'success');
+                            // Начинаем polling статуса
+                            startStatusPolling();
+                        } else {
+                            addLog(\`❌ Ошибка: \${data.message}\`, 'error');
+                        }
+                        await loadAllData();
+                    } catch (error) {
+                        addLog(\`❌ Ошибка: \${error.message}\`, 'error');
+                    } finally {
+                        btn.innerHTML = originalText;
+                        btn.disabled = false;
+                    }
+                }
+                
+                async function testPriceUpdate() {
+                    const btn = document.getElementById('btn-sync-prices');
+                    const originalText = btn.innerHTML;
+                    btn.innerHTML = '⏳ Отправка...';
+                    btn.disabled = true;
+                    
+                    // Тестовые данные для обновления цен
+                    const testData = [
+                        {
+                            id: "test-guitar-001",
+                            quantity: 10,
+                            price_retail: 45000,
+                            price_diller: 35000,
+                            price_mp: 42000,
+                            store_spb: 7,
+                            store_ekb: 3
+                        }
+                    ];
+                    
+                    addLog('💰 Отправка тестового обновления цен...');
+                    
+                    try {
+                        const response = await fetch('/api/update-from-lutner', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(testData)
+                        });
+                        const data = await response.json();
+                        
+                        if (data.status === 'ok') {
+                            addLog(\`✅ Тестовое обновление отправлено. Обновлено \${data.updated} товаров.\`, 'success');
+                        } else {
+                            addLog(\`❌ Ошибка: \${JSON.stringify(data)}\`, 'error');
+                        }
+                        await loadAllData();
+                    } catch (error) {
+                        addLog(\`❌ Ошибка: \${error.message}\`, 'error');
+                    } finally {
+                        btn.innerHTML = originalText;
+                        btn.disabled = false;
+                    }
+                }
+                
+                async function resetSyncFlags() {
+                    if (!confirm('⚠️ ВНИМАНИЕ! Сброс флагов синхронизации отметит все товары как "не синхронизированные". После этого потребуется полная синхронизация. Продолжить?')) {
+                        return;
+                    }
+                    
+                    addLog('🔄 Сброс флагов синхронизации...');
+                    
+                    try {
+                        const response = await fetch('/api/reset-sync-flags', { method: 'POST' });
+                        const data = await response.json();
+                        
+                        if (data.success) {
+                            addLog(\`✅ \${data.message}\`, 'success');
+                        } else {
+                            addLog(\`❌ Ошибка: \${data.error}\`, 'error');
+                        }
+                        await loadAllData();
+                    } catch (error) {
+                        addLog(\`❌ Ошибка: \${error.message}\`, 'error');
+                    }
+                }
+                
+                let pollingInterval = null;
+                
+                function startStatusPolling() {
+                    if (pollingInterval) clearInterval(pollingInterval);
+                    
+                    pollingInterval = setInterval(async () => {
+                        try {
+                            const response = await fetch('/api/sync-status');
+                            const data = await response.json();
+                            
+                            if (!data.sync_in_progress) {
+                                clearInterval(pollingInterval);
+                                pollingInterval = null;
+                                addLog('✅ Синхронизация завершена!', 'success');
+                                await loadAllData();
+                            }
+                        } catch (error) {
+                            console.error('Polling error:', error);
+                        }
+                    }, 5000);
+                }
+                
+                // Загружаем данные при загрузке страницы
+                loadAllData();
+            </script>
+        </body>
+        </html>
+    `);
+});
+
+/**
+ * Сброс флагов синхронизации (помечаем все товары как несинхронизированные)
+ * POST /api/reset-sync-flags
+ */
+app.post('/api/reset-sync-flags', (req: Request, res: Response) => {
+    try {
+        db.prepare("UPDATE catalog SET synced_to_tilda = 0").run();
+        const count = db.prepare("SELECT COUNT(*) as count FROM catalog").get() as { count: number };
+        
+        res.json({
+            success: true,
+            message: `Сброшены флаги для ${count.count} товаров. Теперь они будут синхронизированы при следующем запуске.`
+        });
+    } catch (error) {
+        console.error('Ошибка сброса флагов:', error);
+        res.status(500).json({ success: false, error: 'Ошибка сброса флагов' });
+    }
+});
+
+/**
+ * Получение последних логов сервера (опционально)
+ * GET /api/logs
+ */
+let serverLogs: string[] = [];
+
+function addServerLog(message: string, type: string = 'info') {
+    const timestamp = new Date().toISOString();
+    serverLogs.unshift(`[${timestamp}] [${type}] ${message}`);
+    if (serverLogs.length > 100) serverLogs.pop();
+}
+
+app.get('/api/logs', (req: Request, res: Response) => {
+    res.json({ logs: serverLogs });
+});
+
 // Запускаем сервер с обработкой ошибок
 startServer().catch((error) => {
     console.error('❌ Критическая ошибка при запуске сервера:', error);

@@ -1,12 +1,21 @@
-import express, { Request, Response } from 'express';
-import { promises as fs } from 'fs';
-import path from 'path';
-import cors from 'cors';
+import express, { Request, Response, Express } from 'express';
+import Database from 'better-sqlite3';
+import axios from 'axios';
 import csv from 'csv-parser';
 import { createReadStream } from 'fs';
-import Database from 'better-sqlite3';
+import { pipeline } from 'stream/promises';
+import fs from 'fs/promises';
+import path from 'path';
+import cors from 'cors';
+import dotenv from 'dotenv';
 
-interface Product {
+// ========== ЗАГРУЗКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ==========
+dotenv.config();
+
+// ========== ИНТЕРФЕЙСЫ И ТИПЫ ==========
+
+// Товар в нашей системе (SQLite)
+interface GuitarProduct {
     id: string;
     name: string;
     brand: string;
@@ -19,255 +28,476 @@ interface Product {
     store_ekb: number;
     sale: number;
     lastUpdated: number;
+    tilda_uid?: string;
 }
 
+// Данные от поставщика (API)
+interface LutnerUpdate {
+    id: string;
+    quantity: number;
+    price_retail: number;
+    price_diller: number;
+    price_mp: number;
+    store_spb: number;
+    store_ekb: number;
+}
+
+// Строка из CSV файла
+interface CSVRow {
+    IE_XML_ID: string;
+    IE_NAME: string;
+    IP_PROP96: string;
+    IP_PROP100: string;
+    CP_QUANTITY: string;
+    CV_PRICE_13: string;
+    CV_PRICE_18: string;
+    CV_PRICE_20: string;
+    CP_STORE_SPB: string;
+    CP_STORE_EKB: string;
+    CP_SALE: string;
+}
+
+// Ответ Tilda API
+interface TildaProductResponse {
+    status?: string;
+    result?: {
+        uid?: string;
+        product_id?: string;
+    };
+    error?: string;
+}
+
+// Ответ Tilda API для обновления
+interface TildaUpdateResponse {
+    status: string;
+    result?: {
+        uid: string;
+    };
+    error?: {
+        message: string;
+    };
+}
+
+// Формат ответа нашего API
 interface CatalogResponse {
     success: boolean;
-    count: number;
-    lastUpdate: number | null;
-    products: Product[];
+    total?: number;
+    lastUpdate?: string | null;
+    products?: GuitarProduct[];
     error?: string;
 }
 
-interface DebugResponse {
+// Статус сервера
+interface StatusResponse {
     success: boolean;
     totalProducts: number;
-    latestUpdate: number | null;
-    uniqueBrands: number;
-    brands: string[];
-    error?: string;
+    lastUpdate: string | null;
+    tildaConfigured: boolean;
 }
 
-const app = express();
-const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+// ========== КОНФИГУРАЦИЯ ==========
 
+const app: Express = express();
+const PORT: number = parseInt(process.env.PORT || '3000', 10);
+
+const TILDA_API: string = 'https://api.tildacdn.info/v1';
+const PUBLIC_KEY: string | undefined = process.env.TILDA_PUBLIC_KEY;
+const SECRET_KEY: string | undefined = process.env.TILDA_SECRET_KEY;
+
+const CSV_URL: string = 'https://lutner.ru/bitrix/catalog_export/upload/hour.csv';
+
+// Middleware
 app.use(cors({ origin: ['https://project16053916.tilda.ws'] }));
+app.use(express.json());
 
-const DB_PATH = path.join(__dirname, 'catalog.db');
-const CSV_URL = 'https://lutner.ru/bitrix/catalog_export/upload/hour.csv';
+// ========== ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ ==========
 
-// Инициализация БД
-const db = new Database(DB_PATH);
+const dbPath = path.join(__dirname, '..', 'guitars.db');
+const db = new Database(dbPath);
 
-// Создание таблицы
+// Создаём таблицу, если её нет
 db.exec(`
-    DROP TABLE IF EXISTS products;
-    CREATE TABLE products (
-        id TEXT,
-        name TEXT NOT NULL,
+    CREATE TABLE IF NOT EXISTS catalog (
+        id TEXT PRIMARY KEY,
+        name TEXT,
         brand TEXT,
         description TEXT,
-        quantity INTEGER DEFAULT 0,
-        price_retail REAL DEFAULT 0,
-        price_diller REAL DEFAULT 0,
-        price_mp REAL DEFAULT 0,
-        store_spb INTEGER DEFAULT 0,
-        store_ekb INTEGER DEFAULT 0,
-        sale REAL DEFAULT 0,
-        lastUpdated INTEGER NOT NULL
+        quantity INTEGER,
+        price_retail INTEGER,
+        price_diller INTEGER,
+        price_mp INTEGER,
+        store_spb INTEGER,
+        store_ekb INTEGER,
+        sale INTEGER,
+        lastUpdated INTEGER,
+        tilda_uid TEXT
     )
 `);
 
-// ========== 1. ЗАГРУЗКА CSV И СОЗДАНИЕ КАТАЛОГА ==========
-async function downloadAndBuildCatalog(): Promise<number> {
+console.log('✅ База данных инициализирована');
+
+// ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
+
+function parseNumber(value: string | undefined, defaultValue: number = 0): number {
+    if (!value) return defaultValue;
+    const parsed = parseFloat(value);
+    return isNaN(parsed) ? defaultValue : parsed;
+}
+
+function parseIntSafe(value: string | undefined, defaultValue: number = 0): number {
+    if (!value) return defaultValue;
+    const parsed = parseInt(value, 10);
+    return isNaN(parsed) ? defaultValue : parsed;
+}
+
+function sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// ========== ФУНКЦИИ ДЛЯ РАБОТЫ С TILDA API ==========
+
+/**
+ * Обновление/создание одного товара в Tilda
+ */
+async function updateProductInTilda(product: GuitarProduct): Promise<TildaUpdateResponse | null> {
+    if (!PUBLIC_KEY || !SECRET_KEY) {
+        console.error('❌ Tilda API ключи не настроены');
+        return null;
+    }
+
+    try {
+        const response = await axios.post<TildaUpdateResponse>(`${TILDA_API}/updateproduct`, {
+            publickey: PUBLIC_KEY,
+            secretkey: SECRET_KEY,
+            product_id: product.id,
+            title: product.name,
+            price: product.price_diller,
+            quantity: product.quantity,
+            category: product.brand || '',
+            description: product.description?.slice(0, 500) || '',
+            meta: JSON.stringify({
+                store_spb: product.store_spb,
+                store_ekb: product.store_ekb,
+                price_retail: product.price_retail,
+                price_mp: product.price_mp
+            })
+        });
+
+        // Сохраняем tilda_uid для будущих обновлений
+        if (response.data.result?.uid) {
+            const stmt = db.prepare('UPDATE catalog SET tilda_uid = ? WHERE id = ?');
+            stmt.run(response.data.result.uid, product.id);
+        }
+
+        console.log(`✅ Синхронизирован: ${product.name.slice(0, 40)} (${product.id})`);
+        return response.data;
+
+    } catch (error) {
+        if (axios.isAxiosError(error)) {
+            console.error(`❌ Ошибка синхронизации ${product.id}:`, error.response?.data || error.message);
+        } else {
+            console.error(`❌ Ошибка синхронизации ${product.id}:`, error);
+        }
+        return null;
+    }
+}
+
+/**
+ * Массовая синхронизация каталога с Tilda
+ */
+async function syncCatalogToTilda(products: GuitarProduct[]): Promise<void> {
+    console.log(`🔄 Синхронизация ${products.length} товаров с Tilda API...`);
+    console.log(`⚠️ Лимит API: 150 запросов в час. Процесс займёт время.`);
+
+    const batchSize = 20;
+    let synced = 0;
+
+    for (let i = 0; i < products.length; i += batchSize) {
+        const batch = products.slice(i, i + batchSize);
+        await Promise.all(batch.map(product => updateProductInTilda(product)));
+
+        synced += batch.length;
+        console.log(`📦 Прогресс: ${synced}/${products.length}`);
+
+        // Пауза для соблюдения лимитов API
+        await sleep(2000);
+    }
+
+    console.log(`✅ Синхронизация завершена! Обновлено ${synced} товаров.`);
+}
+
+/**
+ * Быстрое обновление только цен и остатков
+ */
+async function updatePricesInTilda(updates: LutnerUpdate[]): Promise<void> {
+    if (!PUBLIC_KEY || !SECRET_KEY) {
+        console.error('❌ Tilda API ключи не настроены');
+        return;
+    }
+
+    console.log(`🔄 Обновление цен/остатков для ${updates.length} товаров в Tilda...`);
+
+    let updated = 0;
+    for (const update of updates) {
+        try {
+            await axios.post<TildaUpdateResponse>(`${TILDA_API}/updateproduct`, {
+                publickey: PUBLIC_KEY,
+                secretkey: SECRET_KEY,
+                product_id: update.id,
+                price: update.price_diller,
+                quantity: update.quantity
+            });
+            updated++;
+        } catch (error) {
+            if (axios.isAxiosError(error)) {
+                console.error(`Ошибка обновления ${update.id}:`, error.response?.data || error.message);
+            } else {
+                console.error(`Ошибка обновления ${update.id}:`, error);
+            }
+        }
+    }
+
+    console.log(`✅ Обновлено ${updated}/${updates.length} товаров в Tilda`);
+}
+
+// ========== ЗАГРУЗКА CSV И СОХРАНЕНИЕ В SQLITE ==========
+
+async function downloadAndSaveToDB(): Promise<GuitarProduct[] | null> {
     try {
         console.log('🔄 Загрузка CSV с гитарами...');
         const response = await fetch(CSV_URL);
         const csvText = await response.text();
-        
-        const tempCsvPath = path.join(__dirname, 'temp.csv');
+
+        const tempCsvPath = path.join(__dirname, '..', 'temp.csv');
         await fs.writeFile(tempCsvPath, csvText, 'utf8');
-        
-        const products: Product[] = [];
-        
-        await new Promise<void>((resolve, reject) => {
-            createReadStream(tempCsvPath, { encoding: 'utf8' })
-                .pipe(csv({
-                    separator: ';',
-                    mapHeaders: ({ header }) => header.trim()
-                }))
-                .on('data', (row: any) => {
+
+        const products: GuitarProduct[] = [];
+
+        await pipeline(
+            createReadStream(tempCsvPath),
+            csv({ separator: ';', headers: true }),
+            async function* (source) {
+                for await (const row of source) {
+                    const typedRow = row as unknown as CSVRow;
                     products.push({
-                        id: (row.IE_XML_ID as string) || '',
-                        name: (row.IE_NAME as string) || 'Без названия',
-                        brand: (row.IP_PROP96 as string) || '',
-                        description: (row.IP_PROP100 as string) || '',
-                        quantity: parseInt(row.CP_QUANTITY as string) || 0,
-                        price_retail: parseFloat(row.CV_PRICE_13 as string) || 0,
-                        price_diller: parseFloat(row.CV_PRICE_18 as string) || 0,
-                        price_mp: parseFloat(row.CV_PRICE_20 as string) || 0,
-                        store_spb: parseInt(row.CP_STORE_SPB as string) || 0,
-                        store_ekb: parseInt(row.CP_STORE_EKB as string) || 0,
-                        sale: parseFloat(row.CP_SALE as string) || 0,
+                        id: typedRow.IE_XML_ID,
+                        name: typedRow.IE_NAME || 'Без названия',
+                        brand: typedRow.IP_PROP96 || '',
+                        description: (typedRow.IP_PROP100 || '').slice(0, 500),
+                        quantity: parseIntSafe(typedRow.CP_QUANTITY),
+                        price_retail: parseNumber(typedRow.CV_PRICE_13),
+                        price_diller: parseNumber(typedRow.CV_PRICE_18),
+                        price_mp: parseNumber(typedRow.CV_PRICE_20),
+                        store_spb: parseIntSafe(typedRow.CP_STORE_SPB),
+                        store_ekb: parseIntSafe(typedRow.CP_STORE_EKB),
+                        sale: parseNumber(typedRow.CP_SALE),
                         lastUpdated: Date.now()
                     });
-                })
-                .on('end', () => resolve())
-                .on('error', reject);
-        });
-        
-        console.log(`📊 Собрано ${products.length} товаров`);
-        
-        db.prepare('DROP TABLE IF EXISTS products').run();
-        
-        db.exec(`
-            CREATE TABLE products (
-                id TEXT,
-                name TEXT NOT NULL,
-                brand TEXT,
-                description TEXT,
-                quantity INTEGER DEFAULT 0,
-                price_retail REAL DEFAULT 0,
-                price_diller REAL DEFAULT 0,
-                price_mp REAL DEFAULT 0,
-                store_spb INTEGER DEFAULT 0,
-                store_ekb INTEGER DEFAULT 0,
-                sale REAL DEFAULT 0,
-                lastUpdated INTEGER NOT NULL
-            )
+                }
+            }
+        );
+
+        await fs.unlink(tempCsvPath);
+        console.log(`📊 Загружено ${products.length} товаров из CSV`);
+
+        // Сохраняем в SQLite с использованием транзакции
+        const insertStmt = db.prepare(`
+            INSERT OR REPLACE INTO catalog (
+                id, name, brand, description, quantity, price_retail,
+                price_diller, price_mp, store_spb, store_ekb, sale, lastUpdated
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `);
-        
-        const insert = db.prepare(`
-            INSERT INTO products (id, name, brand, description, quantity, price_retail, price_diller, price_mp, store_spb, store_ekb, sale, lastUpdated)
-            VALUES (@id, @name, @brand, @description, @quantity, @price_retail, @price_diller, @price_mp, @store_spb, @store_ekb, @sale, @lastUpdated)
-        `);
-        
-        const insertMany = db.transaction((products: Product[]) => {
-            for (const product of products) {
-                insert.run(product);
+
+        const insertMany = db.transaction((prods: GuitarProduct[]) => {
+            for (const p of prods) {
+                insertStmt.run(
+                    p.id, p.name, p.brand, p.description,
+                    p.quantity, p.price_retail, p.price_diller, p.price_mp,
+                    p.store_spb, p.store_ekb, p.sale, p.lastUpdated
+                );
             }
         });
-        
+
         insertMany(products);
-        
-        await fs.unlink(tempCsvPath);
-        
-        const count = db.prepare('SELECT COUNT(*) as count FROM products').get() as { count: number };
-        console.log(`✅ Каталог сохранён в БД: ${count.count} гитар`);
-        return count.count;
-        
+        console.log(`✅ Сохранено в SQLite: ${products.length} товаров`);
+
+        return products;
+
     } catch (error) {
         console.error('❌ Ошибка загрузки CSV:', error);
-        if (error instanceof Error) {
-            console.error(error.stack);
-        }
-        return 0;
+        return null;
     }
 }
 
-// ========== 2. ЭНДПОИНТ ДЛЯ TILDA ==========
-app.get('/api/catalog', (_req: Request, res: Response<CatalogResponse>) => {
+// ========== ЭНДПОИНТЫ API ==========
+
+/**
+ * Эндпоинт для поставщика (обновление цен каждые 5 минут)
+ * POST /api/update-from-lutner
+ */
+app.post('/api/update-from-lutner', async (req: Request, res: Response) => {
     try {
-        const count = db.prepare('SELECT COUNT(*) as count FROM products').get() as { count: number };
-        const products = db.prepare('SELECT * FROM products').all() as Product[];
-        
-        console.log(`📤 Отправлено ${products.length} товаров на Tilda`);
-        
-        // Для отладки: показываем первые 3 товара
-        if (products.length > 0) {
-            console.log(`🔍 Первые 3 товара в ответе:`);
-            products.slice(0, 3).forEach((p, i) => {
-                console.log(`   ${i+1}. ${p.name} (${p.id})`);
-            });
+        const updates = req.body as LutnerUpdate[];
+
+        if (!Array.isArray(updates)) {
+            return res.status(400).json({ error: 'Ожидается массив товаров' });
         }
-        
-        res.json({
-            success: true,
-            count: products.length,
-            lastUpdate: products[0]?.lastUpdated || null,
-            products: products
-        });
-        
+
+        console.log(`📡 Получено обновление цен: ${updates.length} товаров`);
+
+        // 1. Обновляем в локальной SQLite
+        const updateStmt = db.prepare(`
+            UPDATE catalog SET 
+                quantity = ?, price_retail = ?, price_diller = ?,
+                price_mp = ?, store_spb = ?, store_ekb = ?, lastUpdated = ?
+            WHERE id = ?
+        `);
+
+        const updatedProducts: LutnerUpdate[] = [];
+        for (const update of updates) {
+            updateStmt.run(
+                update.quantity, update.price_retail, update.price_diller,
+                update.price_mp, update.store_spb, update.store_ekb,
+                Date.now(), update.id
+            );
+            updatedProducts.push(update);
+        }
+
+        // 2. Обновляем в Tilda через API
+        await updatePricesInTilda(updatedProducts);
+
+        console.log(`✅ Обновлено ${updatedProducts.length} товаров`);
+        res.json({ status: 'ok', updated: updatedProducts.length });
+
     } catch (error) {
-        console.error('❌ Ошибка в эндпоинте /api/catalog:', error);
-        if (error instanceof Error) {
-            console.error(error.stack);
-        }
-        res.json({
-            success: false,
-            count: 0,
-            products: [],
-            lastUpdate: null,
-            error: error instanceof Error ? error.message : 'Unknown error'
-        });
+        console.error('❌ Ошибка:', error);
+        res.status(500).json({ error: 'Internal server error' });
     }
 });
 
-// ========== 4. КОРНЕВОЙ ЭНДПОИНТ ==========
-app.get('/', (_req: Request, res: Response) => {
-    const count = db.prepare('SELECT COUNT(*) as count FROM products').get() as { count: number };
+/**
+ * Эндпоинт для проверки статуса
+ * GET /api/status
+ */
+app.get('/api/status', (req: Request, res: Response) => {
+    try {
+        const countStmt = db.prepare('SELECT COUNT(*) as count FROM catalog');
+        const count = countStmt.get() as { count: number };
+
+        const lastUpdateStmt = db.prepare('SELECT MAX(lastUpdated) as last FROM catalog');
+        const lastUpdate = lastUpdateStmt.get() as { last: number | null };
+
+        const response: StatusResponse = {
+            success: true,
+            totalProducts: count.count,
+            lastUpdate: lastUpdate.last ? new Date(lastUpdate.last).toISOString() : null,
+            tildaConfigured: !!(PUBLIC_KEY && SECRET_KEY)
+        };
+
+        res.json(response);
+    } catch (error) {
+        console.error('Ошибка при получении статуса:', error);
+        res.status(500).json({ success: false, error: 'Internal server error' });
+    }
+});
+
+/**
+ * Получение списка товаров (с пагинацией)
+ * GET /api/products?page=1&limit=20
+ */
+app.get('/api/products', (req: Request, res: Response) => {
+    try {
+        const page = parseInt(req.query.page as string) || 1;
+        const limit = parseInt(req.query.limit as string) || 20;
+        const offset = (page - 1) * limit;
+
+        const productsStmt = db.prepare(`
+            SELECT * FROM catalog 
+            ORDER BY name ASC 
+            LIMIT ? OFFSET ?
+        `);
+        const products = productsStmt.all(limit, offset) as GuitarProduct[];
+
+        const countStmt = db.prepare('SELECT COUNT(*) as total FROM catalog');
+        const { total } = countStmt.get() as { total: number };
+
+        const response: CatalogResponse = {
+            success: true,
+            total: total,
+            lastUpdate: products[0]?.lastUpdated ? new Date(products[0].lastUpdated).toISOString() : null,
+            products: products
+        };
+
+        res.json(response);
+    } catch (error) {
+        console.error('Ошибка при получении товаров:', error);
+        res.status(500).json({ success: false, error: 'Internal server error' });
+    }
+});
+
+/**
+ * Корневой эндпоинт
+ * GET /
+ */
+app.get('/', (req: Request, res: Response) => {
+    const countStmt = db.prepare('SELECT COUNT(*) as c FROM catalog');
+    const count = (countStmt.get() as { c: number }).c;
+
     res.send(`
-        <h2>🎸 Guitar Shop API Server</h2>
+        <h2>🎸 Guitar Shop API Server (TypeScript)</h2>
         <p>✅ Сервер работает</p>
-        <p>📦 <a href="/api/catalog">Просмотреть каталог</a></p>
-        <p>🔧 <a href="/api/debug">Диагностика</a></p>
+        <p>🔗 <a href="/api/status">Статус каталога</a></p>
+        <p>📦 <a href="/api/products">Товары (первые 20)</a></p>
         <hr>
-        <p>📊 Статус: <span id="status">загрузка...</span></p>
-        <script>
-            fetch('/api/catalog')
-                .then(r => r.json())
-                .then(data => {
-                    document.getElementById('status').innerHTML = 
-                        \`✅ \${data.count} гитар (обновлено: \${data.lastUpdate ? new Date(data.lastUpdate).toLocaleString() : 'никогда'})\`;
-                })
-                .catch(e => document.getElementById('status').innerHTML = '❌ Ошибка: ' + e.message);
-        </script>
+        <h3>📊 Конфигурация:</h3>
+        <ul>
+            <li>Tilda API: ${PUBLIC_KEY ? '✅ настроен' : '❌ не настроен'}</li>
+            <li>База данных: ${count > 0 ? '✅ заполнена' : '⏳ ожидает загрузки'}</li>
+        </ul>
     `);
 });
 
-// ========== 4.1 ЭНДПОИНТ ДИАГНОСТИКИ ==========
-app.get('/api/debug', (_req: Request, res: Response<DebugResponse>) => {
-    try {
-        const count = db.prepare('SELECT COUNT(*) as count FROM products').get() as { count: number };
-        const latest = db.prepare('SELECT * FROM products ORDER BY lastUpdated DESC LIMIT 1').get() as Product | undefined;
-        const brands = db.prepare("SELECT DISTINCT brand FROM products WHERE brand != ''").all() as { brand: string }[];
+// ========== ЗАПУСК СЕРВЕРА ==========
+
+async function startServer(): Promise<void> {
+    // Проверяем, пуста ли база данных
+    const countStmt = db.prepare('SELECT COUNT(*) as c FROM catalog');
+    const count = (countStmt.get() as { c: number }).c;
+
+    if (count === 0) {
+        console.log('📥 База пуста, загружаем CSV...');
+        const products = await downloadAndSaveToDB();
         
-        res.json({
-            success: true,
-            totalProducts: count.count,
-            latestUpdate: latest?.lastUpdated || null,
-            uniqueBrands: brands.length,
-            brands: brands.map(b => b.brand).slice(0, 20)
-        });
-    } catch (error) {
-        res.json({
-            success: false,
-            error: error instanceof Error ? error.message : 'Unknown error',
-            totalProducts: 0,
-            latestUpdate: null,
-            uniqueBrands: 0,
-            brands: []
-        });
+        if (products && products.length > 0 && PUBLIC_KEY && SECRET_KEY) {
+            console.log('🔄 Отправляем данные в Tilda API...');
+            await syncCatalogToTilda(products);
+        } else if (!PUBLIC_KEY || !SECRET_KEY) {
+            console.warn('⚠️ Tilda API ключи не настроены. Синхронизация отключена.');
+        }
+    } else {
+        console.log(`📚 В базе уже ${count} товаров`);
     }
-});
 
-// ========== 5. ЗАПУСК СЕРВЕРА ==========
-app.listen(PORT, async () => {
-    console.log(`\n🚀 Сервер запущен на порту ${PORT}`);
-    console.log(`📍 Эндпоинт для Tilda: GET /api/catalog`);
-    console.log(`📍 Диагностика: GET /api/debug\n`);
-    
-    // Загружаем CSV при старте
-    console.log('📥 Загрузка каталога...');
-    const count = await downloadAndBuildCatalog();
-    console.log(`✅ Готово: ${count} гитар в базе\n`);
-    
-    // Обновляем каталог раз в сутки (86400000 мс)
+    // Запускаем сервер
+    app.listen(PORT, () => {
+        console.log(`\n🚀 Сервер запущен на порту ${PORT}`);
+        console.log(`📍 Эндпоинт для поставщика: POST /api/update-from-lutner`);
+        console.log(`📍 Проверка статуса: GET /api/status`);
+        console.log(`📍 Товары с пагинацией: GET /api/products?page=1&limit=20\n`);
+    });
+
+    // Плановое обновление CSV раз в сутки (24 часа = 86400000 мс)
     setInterval(async () => {
-        console.log('🔄 Плановое обновление каталога...');
-        await downloadAndBuildCatalog();
+        console.log('🔄 Плановое обновление каталога из CSV...');
+        const products = await downloadAndSaveToDB();
+        if (products && products.length > 0 && PUBLIC_KEY && SECRET_KEY) {
+            await syncCatalogToTilda(products);
+        }
     }, 86400000);
-});
+}
 
-// Закрытие БД при остановке
-process.on('SIGINT', () => {
-    db.close();
-    console.log('\n✅ База данных закрыта');
-    process.exit(0);
-});
-
-process.on('SIGTERM', () => {
-    db.close();
-    console.log('\n✅ База данных закрыта');
-    process.exit(0);
+// Запускаем сервер с обработкой ошибок
+startServer().catch((error) => {
+    console.error('❌ Критическая ошибка при запуске сервера:', error);
+    process.exit(1);
 });

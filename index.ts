@@ -100,9 +100,7 @@ interface StatusResponse {
 const app: Express = express();
 const PORT: number = parseInt(process.env.PORT || '3000', 10);
 
-const TILDA_API: string = 'https://api.tildacdn.info/v1';
-const PUBLIC_KEY: string | undefined = process.env.TILDA_PUBLIC_KEY;
-const SECRET_KEY: string | undefined = process.env.TILDA_SECRET_KEY;
+const TILDA_API: string = 'https://api.tildacdn.info/v1';\nconst PUBLIC_KEY: string | undefined = process.env.TILDA_PUBLIC_KEY;\nconst SECRET_KEY: string | undefined = process.env.TILDA_SECRET_KEY;\nconst TILDA_PROJECT_ID: string | undefined = process.env.TILDA_PROJECT_ID;\n\n// Project ID из URL: https://project16053916.tilda.ws -> 16053916\nconst DEFAULT_PROJECT_ID: string = '16053916';}
 
 const CSV_URL: string = 'https://lutner.ru/bitrix/catalog_export/upload/hour.csv';
 
